@@ -1,5 +1,5 @@
 #!/bin/bash
-# Realm 管理脚本 (美化增强版+版本管理)
+# Realm 管理脚本 (终极美化增强版)
 
 # 全局配置
 REALM_DIR="/etc/realm"
@@ -19,6 +19,7 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 PURPLE='\033[0;35m'
 MAGENTA='\033[1;35m'
+ORANGE='\033[0;33m'
 NC='\033[0m'
 
 # 分隔线函数
@@ -51,7 +52,7 @@ get_installed_version() {
 # 获取最新版本
 get_latest_version() {
     # 尝试从GitHub获取最新版本
-    local version=$(curl -sI "$REPO_URL" | grep -i 'location:' | grep -oP 'tag/v?\K[\d.]+')
+    local version=$(curl -sI "$REPO_URL" | grep -i 'location:' | grep -oP 'tag/v?\K[\d.]+' 2>/dev/null)
     
     if [ -z "$version" ]; then
         # 如果无法获取，使用默认值
@@ -62,7 +63,6 @@ get_latest_version() {
 }
 
 # 版本比较函数
-# 返回值: 0=相等, 1=第一个版本新, 2=第二个版本新
 compare_versions() {
     local ver1="${1#v}"  # 移除开头的 "v"
     local ver2="${2#v}"
@@ -92,6 +92,17 @@ compare_versions() {
     fi
     
     return 0
+}
+
+# 检查服务状态
+check_service_status() {
+    if systemctl is-active --quiet realm; then
+        echo -e "${GREEN}运行中${NC}"
+        return 0
+    else
+        echo -e "${RED}未运行${NC}"
+        return 1
+    fi
 }
 
 # 检查安装状态
@@ -351,7 +362,7 @@ restart_service() {
     echo -e "${BLUE}服务已重启！${NC}"
 }
 
-# 查看日志
+# 查看日志 (增强版)
 view_logs() {
     if ! check_installation; then
         echo -e "${RED}错误：Realm未安装！${NC}"
@@ -359,9 +370,33 @@ view_logs() {
     fi
     
     print_header
-    echo -e "${BLUE}Realm 服务日志 (Ctrl+C 退出)${NC}"
+    echo -e "${BLUE}Realm 服务日志${NC}"
     print_separator
+    echo -e "${CYAN}提示：按 ${RED}Ctrl+C ${CYAN}退出日志查看${NC}"
+    print_separator
+    
+    # 显示实时日志
     journalctl -u realm -f
+    
+    # 日志查看结束后提示
+    echo -e "\n${YELLOW}日志查看已结束，按回车键返回主菜单...${NC}"
+    read
+}
+
+# 服务状态检测
+detect_service() {
+    if ! check_installation; then
+        echo -e "${YELLOW}未安装${NC}"
+        return 1
+    fi
+    
+    if systemctl is-active --quiet realm; then
+        echo -e "${GREEN}运行中${NC}"
+        return 0
+    else
+        echo -e "${RED}未运行${NC}"
+        return 1
+    fi
 }
 
 # 卸载Realm
@@ -395,23 +430,22 @@ show_status() {
         local latest_ver=$(get_latest_version)
         
         echo -e "${GREEN}Realm 状态: ${CYAN}已安装${NC}"
+        echo -e "${CYAN}当前版本: ${YELLOW}$installed_ver${NC}"
+        echo -e "${CYAN}最新版本: ${GREEN}$latest_ver${NC}"
+        
+        # 服务状态检测
+        echo -e "${CYAN}服务状态: $(detect_service)"
         
         # 版本比较
         compare_versions "$installed_ver" "$latest_ver"
         local cmp_result=$?
         
         if [ $cmp_result -eq 2 ]; then
-            echo -e "${YELLOW}有新版本可用: ${GREEN}$latest_ver${NC}"
-        fi
-        
-        # 检查服务状态
-        if systemctl is-active --quiet realm; then
-            echo -e "${GREEN}服务状态: ${CYAN}运行中${NC}"
-        else
-            echo -e "${YELLOW}服务状态: ${RED}未运行${NC}"
+            echo -e "${YELLOW}有新版本可用! ${GREEN}请选择选项1更新${NC}"
         fi
     else
         echo -e "${YELLOW}Realm 状态: ${RED}未安装${NC}"
+        echo -e "${CYAN}最新版本: ${GREEN}$(get_latest_version)${NC}"
     fi
     print_separator
 }
@@ -420,6 +454,9 @@ show_status() {
 show_menu() {
     print_header
     show_status
+    
+    # 服务状态变量
+    local service_status=$(detect_service)
     
     # 菜单选项
     echo -e "${MAGENTA} 1. 安装/更新 Realm${NC}"
@@ -430,11 +467,22 @@ show_menu() {
     print_separator
     echo -e "${MAGENTA} 4. 删除转发规则${NC}"
     print_separator
-    echo -e "${MAGENTA} 5. 启动服务${NC}"
-    print_separator
-    echo -e "${MAGENTA} 6. 停止服务${NC}"
-    print_separator
-    echo -e "${MAGENTA} 7. 重启服务${NC}"
+    
+    # 动态服务控制选项
+    if [[ "$service_status" == *"运行中"* ]]; then
+        echo -e "${GREEN} 5. 启动服务${NC}   [状态: ${GREEN}运行中${NC}]"
+        print_separator
+        echo -e "${ORANGE} 6. 停止服务${NC}"
+        print_separator
+        echo -e "${BLUE} 7. 重启服务${NC}"
+    else
+        echo -e "${ORANGE} 5. 启动服务${NC}   [状态: ${RED}未运行${NC}]"
+        print_separator
+        echo -e "${YELLOW} 6. 停止服务${NC}   [服务未运行]"
+        print_separator
+        echo -e "${YELLOW} 7. 重启服务${NC}   [服务未运行]"
+    fi
+    
     print_separator
     echo -e "${MAGENTA} 8. 查看日志${NC}"
     print_separator
@@ -457,9 +505,27 @@ main() {
             2) add_rule ;;
             3) view_rules ;;
             4) delete_rule ;;
-            5) start_service ;;
-            6) stop_service ;;
-            7) restart_service ;;
+            5) 
+                if [[ "$(detect_service)" != *"运行中"* ]]; then
+                    start_service
+                else
+                    echo -e "${YELLOW}服务已在运行中，无需启动${NC}"
+                fi
+                ;;
+            6) 
+                if [[ "$(detect_service)" == *"运行中"* ]]; then
+                    stop_service
+                else
+                    echo -e "${YELLOW}服务未运行，无需停止${NC}"
+                fi
+                ;;
+            7) 
+                if [[ "$(detect_service)" == *"运行中"* ]]; then
+                    restart_service
+                else
+                    echo -e "${YELLOW}服务未运行，无法重启${NC}"
+                fi
+                ;;
             8) view_logs ;;
             9) uninstall_realm ;;
             0) 
