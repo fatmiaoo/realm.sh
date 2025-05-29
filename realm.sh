@@ -1,5 +1,5 @@
 #!/bin/bash
-# realm.sh - Realm 管理脚本 v1.3
+# realm.sh - Realm 管理脚本 v1.4
 
 # 全局配置
 REALM_DIR="/etc/realm"
@@ -54,6 +54,37 @@ compare_versions() {
     return 0
 }
 
+# 获取最新版本（改进版本）
+get_latest_version() {
+    # 尝试三种不同方法获取最新版本
+    local version_sources=(
+        # 方法1: 使用GitHub API
+        "$(curl -s "$REPO_URL" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')"
+        
+        # 方法2: 解析GitHub发布页面
+        "$(curl -s https://github.com/zhboner/realm/releases | \
+          grep -oE '/zhboner/realm/releases/tag/v[0-9]+\.[0-9]+\.[0-9]+' | \
+          head -1 | awk -F'/' '{print $NF}')"
+          
+        # 方法3: 从下载链接解析
+        "$(curl -s https://github.com/zhboner/realm/releases | \
+          grep -oE 'href="/zhboner/realm/releases/download/v[0-9]+\.[0-9]+\.[0-9]+' | \
+          head -1 | awk -F'/' '{print $NF}')"
+    )
+    
+    # 验证并选择有效的版本
+    for version in "${version_sources[@]}"; do
+        if [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            LATEST_VERSION="$version"
+            return
+        fi
+    done
+    
+    # 所有方法都失败时使用默认版本
+    echo -e "${YELLOW}警告：无法获取最新版本号，使用默认版本 v2.7.0${NC}"
+    LATEST_VERSION="v2.7.0"
+}
+
 # 初始化检查
 initialize() {
     # 1. 检查root权限
@@ -102,27 +133,6 @@ initialize() {
     
     # 7. 获取最新版本
     get_latest_version
-}
-
-# 获取最新版本
-get_latest_version() {
-    local response
-    response=$(curl -s "$REPO_URL")
-    
-    if [ $? -ne 0 ]; then
-        echo -e "${YELLOW}警告：无法访问GitHub API，尝试备用方法获取版本...${NC}"
-        # 尝试从HTML页面解析版本
-        LATEST_VERSION=$(curl -s https://github.com/zhboner/realm/releases | \
-            grep -oP '/zhboner/realm/releases/tag/\Kv[\d.]+' | \
-            head -1)
-    else
-        LATEST_VERSION=$(echo "$response" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    fi
-    
-    if [ -z "$LATEST_VERSION" ]; then
-        echo -e "${YELLOW}警告：无法获取最新版本号，使用默认版本 v2.7.0${NC}"
-        LATEST_VERSION="v2.7.0"
-    fi
 }
 
 # 安装/更新Realm
@@ -428,7 +438,7 @@ show_system_info() {
 # 显示状态信息
 show_status() {
     if [ -n "$INSTALLED_VERSION" ]; then
-        echo -e "${GREEN}Realm 状态: ${CYAN}已安装 ($INSTALLED_VERSION)${NC}"
+        echo -e "${GREEN}Realm 状态: ${CYAN}已安装 (v$INSTALLED_VERSION)${NC}"
         systemctl is-active --quiet realm && \
             echo -e "${GREEN}服务状态: ${CYAN}运行中${NC}" || \
             echo -e "${YELLOW}服务状态: ${RED}未运行${NC}"
@@ -452,7 +462,7 @@ show_status() {
 # 显示菜单
 show_menu() {
     clear
-    echo -e "\n${GREEN}Realm 管理脚本 v1.3${NC}"
+    echo -e "\n${GREEN}Realm 管理脚本 v1.4${NC}"
     echo "========================================"
     show_system_info
     echo "----------------------------------------"
