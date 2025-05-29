@@ -5,6 +5,10 @@
 # 开源地址: https://github.com/zhboner/realm
 # 系统要求: CentOS 7+/Debian 9+/Ubuntu 18.04+
 
+# ========================================
+# 颜色定义
+# ========================================
+
 RED="\033[31m"
 GREEN="\033[32m"
 YELLOW="\033[33m"
@@ -12,6 +16,10 @@ BLUE="\033[34m"
 MAGENTA="\033[35m"
 CYAN="\033[36m"
 PLAIN="\033[0m"
+
+# ========================================
+# 全局配置
+# ========================================
 
 CONFIG_DIR="/etc/realm"
 CONFIG_FILE="$CONFIG_DIR/config.toml"
@@ -31,8 +39,45 @@ get_latest_version() {
         echo -e "\r${GREEN}最新版本: $LATEST_VERSION${PLAIN}"
     fi
 }
+# ========================================
+# 初始化检查
+# ========================================
 
-# 架构检测
+init_check() {
+    # 检查root权限
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "${RED}✖ 必须使用root权限运行本脚本${NC}"
+        exit 1
+    fi
+
+    # 检查curl安装
+    if ! command -v curl &> /dev/null; then
+        echo -e "${YELLOW}▶ 正在安装curl工具...${NC}"
+        if command -v apt-get &> /dev/null; then
+            apt-get update && apt-get install -y curl
+        elif command -v yum &> /dev/null; then
+            yum install -y curl
+        else
+            echo -e "${RED}✖ 无法安装curl，请手动安装${NC}"
+            exit 1
+        fi
+    fi
+
+    # 创建必要目录
+    mkdir -p "$REALM_DIR"
+    if [[ ! -w $(dirname "$LOG_FILE") ]]; then
+        echo -e "${RED}✖ 日志目录不可写，请检查权限${NC}"
+        exit 1
+    fi
+    touch "$LOG_FILE" || {
+        echo -e "${RED}✖ 无法创建日志文件${NC}"
+        exit 1
+    }
+
+    log "脚本启动 v$CURRENT_VERSION"
+}
+    
+    # 架构检测
 arch_check() {
     case "$(uname -m)" in
         x86_64)  ARCH="amd64" ;;
