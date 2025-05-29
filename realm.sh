@@ -125,11 +125,11 @@ install_realm() {
         echo -e "${YELLOW}Realm 已安装，将更新到最新版本${PLAIN}"
     fi
     
-    DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}/realm-${ARCH}-unknown-linux-gnu.tar.gz"
+    DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/v${LATEST_VERSION}/realm-x86_64-unknown-linux-gnu.tar.gz"
     
     echo -e "${YELLOW}正在下载 Realm ${LATEST_VERSION}...${PLAIN}"
-    mkdir -p /tmp/realm
-    curl -sL "$DOWNLOAD_URL" -o /tmp/realm.tar.gz
+    mkdir -p "$REALM_DIR"
+    cd "$REALM_DIR" || exit 1
     
     if [ $? -ne 0 ]; then
         echo -e "${RED}下载失败! 请检查网络或手动下载:${PLAIN} $DOWNLOAD_URL"
@@ -137,10 +137,9 @@ install_realm() {
     fi
     
     # 解压安装
-    tar xzf /tmp/realm.tar.gz -C /tmp/realm
-    mv /tmp/realm/realm /usr/local/bin/realm
-    chmod +x /usr/local/bin/realm
-    rm -rf /tmp/realm /tmp/realm.tar.gz
+    tar -xzf realm.tar.gz
+    chmod +x realm
+    rm realm.tar.gz
     
     if [ ! -f /usr/local/bin/realm ]; then
         echo -e "${RED}安装失败!${PLAIN}"
