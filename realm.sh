@@ -125,15 +125,32 @@ install_realm() {
         echo -e "${YELLOW}Realm 已安装，将更新到最新版本${PLAIN}"
     fi
     
-    DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/v${LATEST_VERSION}/realm-x86_64-unknown-linux-gnu.tar.gz"
-    
-    echo -e "${YELLOW}正在下载 Realm ${LATEST_VERSION}...${PLAIN}"
     mkdir -p "$REALM_DIR"
     cd "$REALM_DIR" || exit 1
     
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}下载失败! 请检查网络或手动下载:${PLAIN} $DOWNLOAD_URL"
-        exit 1
+    # 获取最新版本号
+    echo -e "${BLUE}▶ 正在检测最新版本...${NC}"
+    LATEST_VERSION=$(curl -sL https://github.com/zhboner/realm/releases | grep -oE '/zhboner/realm/releases/tag/v[0-9]+\.[0-9]+\.[0-9]+' | head -n1 | cut -d'/' -f6 | tr -d 'v')
+    
+    # 版本号验证
+    if [[ -z "$LATEST_VERSION" || ! "$LATEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        log "版本检测失败，使用备用版本2.7.0"
+        LATEST_VERSION="2.7.0"
+        echo -e "${YELLOW}⚠ 无法获取最新版本，使用备用版本 v${LATEST_VERSION}${NC}"
+    else
+        echo -e "${GREEN}✓ 检测到最新版本 v${LATEST_VERSION}${NC}"
+    fi
+    
+    # 下载最新版本
+    DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/v${LATEST_VERSION}/realm-x86_64-unknown-linux-gnu.tar.gz"
+    echo -e "${YELLOW}正在下载 Realm ${LATEST_VERSION}...${PLAIN}"
+     if ! wget --show-progress -qO realm.tar.gz "$DOWNLOAD_URL"; then
+        log "安装失败：下载错误"
+        echo -e "${RED}✖ 文件下载失败，请检查：${NC}"
+        echo -e "1. 网络连接状态"
+        echo -e "2. GitHub访问权限"
+        echo -e "3. 手动验证下载地址: $DOWNLOAD_URL"
+        return 1
     fi
     
     # 解压安装
@@ -141,12 +158,7 @@ install_realm() {
     chmod +x realm
     rm realm.tar.gz
     
-    if [ ! -f /usr/local/bin/realm ]; then
-        echo -e "${RED}安装失败!${PLAIN}"
-        exit 1
-    fi
-    
-    # 创建基础配置文件
+    # 初始化配置文件
     if [ ! -f "$CONFIG_FILE" ]; then
         cat > "$CONFIG_FILE" << EOF
 [log]
