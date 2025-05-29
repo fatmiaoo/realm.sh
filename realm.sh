@@ -1,5 +1,5 @@
 #!/bin/bash
-# realm.sh - Realm 管理脚本 v1.2
+# realm.sh - Realm 管理脚本 v1.3
 
 # 全局配置
 REALM_DIR="/etc/realm"
@@ -19,6 +19,40 @@ YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
+
+# 版本比较函数 (支持语义化版本比较)
+# 返回值: 0=相等, 1=第一个版本新, 2=第二个版本新
+compare_versions() {
+    local ver1="${1#v}"  # 移除开头的 "v"
+    local ver2="${2#v}"
+    
+    # 分割版本号为数组
+    IFS='.' read -ra ver1_parts <<< "$ver1"
+    IFS='.' read -ra ver2_parts <<< "$ver2"
+    
+    # 比较每个部分
+    for i in "${!ver1_parts[@]}"; do
+        # 如果ver2没有对应的部分，则ver1较新
+        if [[ -z ${ver2_parts[i]} ]]; then
+            return 1
+        fi
+        
+        # 比较数字部分
+        if [[ ${ver1_parts[i]} -gt ${ver2_parts[i]} ]]; then
+            return 1
+        elif [[ ${ver1_parts[i]} -lt ${ver2_parts[i]} ]]; then
+            return 2
+        fi
+    done
+    
+    # 如果ver2还有额外的部分，则ver2较新
+    if [[ ${#ver2_parts[@]} -gt ${#ver1_parts[@]} ]]; then
+        return 2
+    fi
+    
+    # 版本完全相等
+    return 0
+}
 
 # 初始化检查
 initialize() {
@@ -65,11 +99,26 @@ initialize() {
     if [ -f "$REALM_BIN" ]; then
         INSTALLED_VERSION=$("$REALM_BIN" -v 2>/dev/null | awk '{print $2}')
     fi
+    
+    # 7. 获取最新版本
+    get_latest_version
 }
 
 # 获取最新版本
 get_latest_version() {
-    LATEST_VERSION=$(curl -s "$REPO_URL" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    local response
+    response=$(curl -s "$REPO_URL")
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${YELLOW}警告：无法访问GitHub API，尝试备用方法获取版本...${NC}"
+        # 尝试从HTML页面解析版本
+        LATEST_VERSION=$(curl -s https://github.com/zhboner/realm/releases | \
+            grep -oP '/zhboner/realm/releases/tag/\Kv[\d.]+' | \
+            head -1)
+    else
+        LATEST_VERSION=$(echo "$response" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    fi
+    
     if [ -z "$LATEST_VERSION" ]; then
         echo -e "${YELLOW}警告：无法获取最新版本号，使用默认版本 v2.7.0${NC}"
         LATEST_VERSION="v2.7.0"
@@ -79,16 +128,27 @@ get_latest_version() {
 # 安装/更新Realm
 install_realm() {
     initialize
-    get_latest_version
+    
+    echo -e "${CYAN}当前安装版本: ${YELLOW}${INSTALLED_VERSION:-未安装}${NC}"
+    echo -e "${CYAN}最新可用版本: ${GREEN}$LATEST_VERSION${NC}"
     
     if [ -n "$INSTALLED_VERSION" ]; then
-        echo -e "${YELLOW}检测到已安装版本: ${CYAN}$INSTALLED_VERSION${NC}"
-        if [ "$INSTALLED_VERSION" == "$LATEST_VERSION" ]; then
+        # 比较版本
+        compare_versions "$INSTALLED_VERSION" "$LATEST_VERSION"
+        local cmp_result=$?
+        
+        if [ $cmp_result -eq 0 ]; then
             echo -e "${GREEN}已是最新版本，无需更新${NC}"
             return
+        elif [ $cmp_result -eq 1 ]; then
+            echo -e "${YELLOW}警告：已安装版本 ($INSTALLED_VERSION) 比最新版 ($LATEST_VERSION) 更高${NC}"
+            read -p "是否继续降级安装？(y/n) " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                return
+            fi
         else
-            echo -e "${YELLOW}发现新版本: ${CYAN}$LATEST_VERSION${NC}"
-            echo -e "${YELLOW}正在更新Realm...${NC}"
+            echo -e "${YELLOW}发现新版本: ${GREEN}$LATEST_VERSION${NC}"
         fi
     else
         echo -e "${YELLOW}正在安装Realm...${NC}"
@@ -96,13 +156,15 @@ install_realm() {
     
     DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/$LATEST_VERSION/realm-x86_64-unknown-linux-gnu.tar.gz"
     
+    echo -e "${YELLOW}下载Realm ($LATEST_VERSION)...${NC}"
     wget -P "$REALM_DIR" "$DOWNLOAD_URL" > /dev/null 2>&1
     
     if [ $? -ne 0 ]; then
-        echo -e "${RED}下载失败，请检查网络连接！${NC}"
+        echo -e "${RED}下载失败，请检查网络连接和版本号！${NC}"
         exit 1
     fi
     
+    echo -e "${YELLOW}解压安装文件...${NC}"
     tar -zxvf "$REALM_DIR/realm-x86_64-unknown-linux-gnu.tar.gz" -C "$REALM_DIR" > /dev/null
     chmod +x "$REALM_BIN"
     rm -f "$REALM_DIR"/*.tar.gz
@@ -142,6 +204,11 @@ EOF
     fi
     
     echo -e "${GREEN}Realm ${CYAN}${INSTALLED_VERSION:-新版本}${GREEN} 安装/更新成功！${NC}"
+    
+    # 启动服务
+    systemctl start realm > /dev/null 2>&1
+    systemctl enable realm > /dev/null 2>&1
+    echo -e "${BLUE}服务已启动并设置为开机自启${NC}"
 }
 
 # 添加转发规则
@@ -375,12 +442,17 @@ show_status() {
     else
         echo -e "${YELLOW}自动更新: ${RED}未启用${NC}"
     fi
+    
+    # 显示最新版本信息
+    if [ -n "$LATEST_VERSION" ]; then
+        echo -e "${CYAN}最新版本: ${GREEN}$LATEST_VERSION${NC}"
+    fi
 }
 
 # 显示菜单
 show_menu() {
     clear
-    echo -e "\n${GREEN}Realm 管理脚本 v1.2${NC}"
+    echo -e "\n${GREEN}Realm 管理脚本 v1.3${NC}"
     echo "========================================"
     show_system_info
     echo "----------------------------------------"
