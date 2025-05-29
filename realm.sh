@@ -136,6 +136,7 @@ install_realm() {
         exit 1
     fi
     
+    # 解压安装
     tar xzf /tmp/realm.tar.gz -C /tmp/realm
     mv /tmp/realm/realm /usr/local/bin/realm
     chmod +x /usr/local/bin/realm
