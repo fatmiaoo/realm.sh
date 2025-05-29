@@ -1,10 +1,9 @@
 #!/bin/bash
-# Realm 管理脚本 v1.7
+# realm.sh - Realm 管理脚本 v1.6
 
 # 全局配置
 REALM_DIR="/etc/realm"
 CONFIG_FILE="$REALM_DIR/config.toml"
-BACKUP_DIR="$REALM_DIR/backups"
 SERVICE_FILE="/etc/systemd/system/realm.service"
 REALM_BIN="$REALM_DIR/realm"
 REPO_URL="https://api.github.com/repos/zhboner/realm/releases/latest"
@@ -12,246 +11,205 @@ INSTALLED_VERSION=""
 LATEST_VERSION=""
 SCRIPT_NAME=$(basename "$0")
 SCRIPT_PATH=$(realpath "$0")
-MAX_BACKUPS=5
 
 # 颜色定义
-COLOR_RESET='\033[0m'
-COLOR_ERROR='\033[0;31m'
-COLOR_SUCCESS='\033[0;32m'
-COLOR_WARNING='\033[0;33m'
-COLOR_INFO='\033[0;34m'
-COLOR_DEBUG='\033[0;36m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
 
-# 日志函数
-log() {
-    local level=$1
-    local message=$2
-    local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
-    case $level in
-        "error") echo -e "${COLOR_ERROR}[$timestamp] ERROR: $message${COLOR_RESET}" ;;
-        "success") echo -e "${COLOR_SUCCESS}[$timestamp] SUCCESS: $message${COLOR_RESET}" ;;
-        "warning") echo -e "${COLOR_WARNING}[$timestamp] WARNING: $message${COLOR_RESET}" ;;
-        "info") echo -e "${COLOR_INFO}[$timestamp] INFO: $message${COLOR_RESET}" ;;
-        "debug") echo -e "${COLOR_DEBUG}[$timestamp] DEBUG: $message${COLOR_RESET}" ;;
-    esac
-}
-
-# 版本比较函数 (增强版)
+# 版本比较函数 (支持语义化版本比较)
+# 返回值: 0=相等, 1=第一个版本新, 2=第二个版本新
 compare_versions() {
-    local ver1="${1//v/}"  # 移除所有v字符
-    local ver2="${2//v/}"
+    local ver1="${1#v}"  # 移除开头的 "v"
+    local ver2="${2#v}"
     
-    # 分割为数字数组
+    # 分割版本号为数组
     IFS='.' read -ra ver1_parts <<< "$ver1"
     IFS='.' read -ra ver2_parts <<< "$ver2"
     
     # 比较每个部分
     for i in "${!ver1_parts[@]}"; do
-        local part1=${ver1_parts[i]}
-        local part2=${ver2_parts[i]:-0}
+        # 如果ver2没有对应的部分，则ver1较新
+        if [[ -z ${ver2_parts[i]} ]]; then
+            return 1
+        fi
         
-        # 转换为数字比较
-        if ((10#${part1} > 10#${part2})); then return 1; fi
-        if ((10#${part1} < 10#${part2})); then return 2; fi
+        # 比较数字部分
+        if [[ ${ver1_parts[i]} -gt ${ver2_parts[i]} ]]; then
+            return 1
+        elif [[ ${ver1_parts[i]} -lt ${ver2_parts[i]} ]]; then
+            return 2
+        fi
     done
     
-    # 处理额外部分
-    if ((${#ver2_parts[@]} > ${#ver1_parts[@]})); then
-        for ((i=${#ver1_parts[@]}; i<${#ver2_parts[@]}; i++)); do
-            ((10#${ver2_parts[i]} > 0)) && return 2
-        done
+    # 如果ver2还有额外的部分，则ver2较新
+    if [[ ${#ver2_parts[@]} -gt ${#ver1_parts[@]} ]]; then
+        return 2
     fi
     
+    # 版本完全相等
     return 0
 }
 
-# 网络检测函数
-check_network() {
-    local test_urls=(
-        "https://github.com"
-        "https://google.com"
-        "https://cloudflare.com"
-    )
-    
-    for url in "${test_urls[@]}"; do
-        if curl --silent --connect-timeout 5 --head "$url" >/dev/null; then
-            log debug "网络检测通过: $url"
-            return 0
-        fi
-    done
-    
-    log error "网络连接失败，请检查网络设置！"
-    return 1
-}
-
-# 备份配置文件
-backup_config() {
-    local backup_name="config-$(date +%Y%m%d%H%M%S).toml.bak"
-    mkdir -p "$BACKUP_DIR"
-    cp "$CONFIG_FILE" "$BACKUP_DIR/$backup_name"
-    
-    # 清理旧备份
-    local backups=($(ls -t "$BACKUP_DIR"/*.bak 2>/dev/null))
-    if ((${#backups[@]} > MAX_BACKUPS)); then
-        rm -f "${backups[@]:$MAX_BACKUPS}"
-    fi
-}
-
-# 恢复配置文件
-restore_config() {
-    local backups=($(ls -t "$BACKUP_DIR"/*.bak 2>/dev/null))
-    if ((${#backups[@]} == 0)); then
-        log warning "未找到可用的配置文件备份"
-        return 1
-    fi
-    
-    PS3="请选择要恢复的备份: "
-    select backup in "${backups[@]}"; do
-        if [[ -n "$backup" ]]; then
-            cp -f "$backup" "$CONFIG_FILE"
-            log success "配置文件已从 $backup 恢复"
-            restart_service
-            return 0
-        fi
-        log error "无效选择"
-        return 1
-    done
-}
-
-# 获取最新版本信息（增强容错）
+# 获取最新版本（完全重构）
 get_latest_version() {
-    check_network || return 1
+    # 直接使用GitHub API获取版本信息
+    local api_response
+    api_response=$(curl -s -H "Accept: application/vnd.github.v3+json" "$REPO_URL")
     
-    local attempts=0
-    while ((attempts < 3)); do
-        local api_response=$(curl -s -H "Accept: application/vnd.github.v3+json" "$REPO_URL")
-        if [[ $? -eq 0 ]]; then
-            LATEST_VERSION=$(echo "$api_response" | grep '"tag_name":' | cut -d'"' -f4)
-            if [[ "$LATEST_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                log debug "从API获取最新版本: $LATEST_VERSION"
-                return 0
-            fi
+    if [ $? -ne 0 ]; then
+        echo -e "${YELLOW}警告：无法访问GitHub API，尝试备用方法...${NC}"
+        # 备用方法：从下载页面解析
+        LATEST_VERSION=$(curl -s https://github.com/zhboner/realm/releases | \
+            grep -oE 'realm/releases/tag/v[0-9]+\.[0-9]+\.[0-9]+' | \
+            head -1 | awk -F'/' '{print $NF}')
+        
+        if [[ "$LATEST_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo -e "${GREEN}使用备用方法获取版本: ${CYAN}$LATEST_VERSION${NC}"
+            return
         fi
-        ((attempts++))
-        sleep 1
-    done
-
-    log warning "无法通过API获取版本，尝试备用方法..."
-    LATEST_VERSION=$(curl -s https://github.com/zhboner/realm/releases | grep -oE 'realm/releases/tag/v[0-9]+\.[0-9]+\.[0-9]+' | head -1 | awk -F'/' '{print $NF}')
-    if [[ "$LATEST_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        log debug "从HTML获取最新版本: $LATEST_VERSION"
-        return 0
+    else
+        # 从API响应中提取版本号
+        LATEST_VERSION=$(echo "$api_response" | grep '"tag_name":' | cut -d'"' -f4)
     fi
-
-    log error "无法获取有效版本，使用默认v2.7.0"
-    LATEST_VERSION="v2.7.0"
-    return 1
+    
+    # 验证版本格式
+    if ! [[ "$LATEST_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${YELLOW}警告：无法获取有效版本号，使用默认版本 v2.7.0${NC}"
+        LATEST_VERSION="v2.7.0"
+    fi
+    
+    echo -e "${GREEN}检测到最新版本: ${CYAN}$LATEST_VERSION${NC}"
 }
 
-# 获取安装版本（增强容错）
+# 获取已安装版本（完全重构）
 get_installed_version() {
-    if [[ -x "$REALM_BIN" ]]; then
-        INSTALLED_VERSION=$("$REALM_BIN" --version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+')
-        if [[ -z "$INSTALLED_VERSION" ]]; then
-            local mtime=$(stat -c %y "$REALM_BIN" | cut -d' ' -f1)
-            INSTALLED_VERSION="未知版本 (安装时间: $mtime)"
+    if [ -f "$REALM_BIN" ]; then
+        # 尝试多种方法获取版本信息
+        local version_output
+        version_output=$("$REALM_BIN" -v 2>/dev/null || "$REALM_BIN" --version 2>/dev/null)
+        
+        # 尝试解析版本号
+        if [[ "$version_output" =~ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            INSTALLED_VERSION="v${BASH_REMATCH[0]}"
+        elif [[ "$version_output" =~ v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            INSTALLED_VERSION="${BASH_REMATCH[0]}"
+        else
+            # 如果无法解析，使用文件时间戳作为最后手段
+            local install_date
+            install_date=$(stat -c %y "$REALM_BIN" | cut -d' ' -f1)
+            INSTALLED_VERSION="未知版本 (安装于 $install_date)"
         fi
     else
         INSTALLED_VERSION="未安装"
     fi
 }
 
-# 初始化流程（增强检查）
+# 初始化检查
 initialize() {
-    # Root检查
-    [[ $EUID -ne 0 ]] && { log error "必须使用root权限运行"; exit 1; }
-    
-    # 系统兼容性检查
-    if ! grep -qs 'ID=debian' /etc/os-release || ! grep -qs 'VERSION_ID="11"' /etc/os-release; then
-        log warning "非Debian 11系统，可能不兼容"
-        read -p "是否继续？(y/N) " -n 1 -r
-        [[ $REPLY =~ ^[Yy]$ ]] || exit 1
+    # 1. 检查root权限
+    if [ "$(id -u)" != "0" ]; then
+        echo -e "${RED}错误：此脚本必须以root权限运行！${NC}"
+        exit 1
     fi
     
-    # 依赖检查
-    local deps=(wget tar curl)
-    local missing=()
-    for dep in "${deps[@]}"; do
-        ! command -v "$dep" &>/dev/null && missing+=("$dep")
+    # 2. 检查系统是否为Debian 11
+    if ! grep -q 'Debian GNU/Linux 11' /etc/os-release; then
+        echo -e "${YELLOW}警告：此脚本专为Debian 11设计，其他系统可能不兼容${NC}"
+        read -p "是否继续？(y/n) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
+    
+    # 3. 创建必要目录
+    mkdir -p "$REALM_DIR"
+    
+    # 4. 检查并安装必要依赖
+    local missing_deps=()
+    for dep in wget tar curl; do
+        if ! command -v $dep &> /dev/null; then
+            missing_deps+=("$dep")
+        fi
     done
     
-    if ((${#missing[@]} > 0)); then
-        log info "正在安装缺失依赖: ${missing[*]}"
-        apt-get update -qq >/dev/null
-        apt-get install -y -qq "${missing[@]}" >/dev/null || {
-            log error "依赖安装失败"; exit 1
-        }
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo -e "${YELLOW}正在安装必要依赖: ${missing_deps[*]}...${NC}"
+        apt update > /dev/null 2>&1
+        apt install -y "${missing_deps[@]}" > /dev/null 2>&1
     fi
     
-    # 目录初始化
-    mkdir -p "$REALM_DIR" "$BACKUP_DIR"
+    # 5. 检查curl是否正常工作
+    if ! curl -s --connect-timeout 5 https://github.com > /dev/null; then
+        echo -e "${RED}网络连接检查失败，请确保网络正常！${NC}"
+        exit 1
+    fi
     
-    # 获取版本信息
+    # 6. 获取版本信息
     get_installed_version
-    get_latest_version || true
+    get_latest_version
 }
 
-# 安装/更新流程（增加完整性检查）
+# 安装/更新Realm
 install_realm() {
     initialize
     
-    log info "当前版本: $INSTALLED_VERSION"
-    log info "最新版本: $LATEST_VERSION"
+    echo -e "${CYAN}当前安装版本: ${YELLOW}$INSTALLED_VERSION${NC}"
+    echo -e "${CYAN}最新可用版本: ${GREEN}$LATEST_VERSION${NC}"
     
     if [[ "$INSTALLED_VERSION" != "未安装" ]]; then
+        # 比较版本
         compare_versions "${INSTALLED_VERSION#v}" "${LATEST_VERSION#v}"
-        local cmp=$?
-        case $cmp in
-            0) log info "已经是最新版本"; return ;;
-            1) log warning "本地版本较新，建议谨慎更新" ;;
-            2) log info "发现新版本，开始更新" ;;
-        esac
+        local cmp_result=$?
+        
+        if [ $cmp_result -eq 0 ]; then
+            echo -e "${GREEN}已是最新版本，无需更新${NC}"
+            return
+        elif [ $cmp_result -eq 1 ]; then
+            echo -e "${YELLOW}警告：已安装版本 ($INSTALLED_VERSION) 比最新版 ($LATEST_VERSION) 更高${NC}"
+            read -p "是否继续降级安装？(y/n) " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                return
+            fi
+        else
+            echo -e "${YELLOW}发现新版本: ${GREEN}$LATEST_VERSION${NC}"
+        fi
+    else
+        echo -e "${YELLOW}正在安装Realm...${NC}"
     fi
     
-    local download_url="https://github.com/zhboner/realm/releases/download/$LATEST_VERSION/realm-x86_64-unknown-linux-gnu.tar.gz"
-    local temp_file="/tmp/realm-$(date +%s).tar.gz"
+    DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/$LATEST_VERSION/realm-x86_64-unknown-linux-gnu.tar.gz"
     
-    log info "下载程序包..."
-    if ! wget -qO "$temp_file" "$download_url"; then
-        log error "下载失败，请检查网络连接"
-        rm -f "$temp_file"
-        return 1
+    echo -e "${YELLOW}下载Realm ($LATEST_VERSION)...${NC}"
+    wget -P "$REALM_DIR" "$DOWNLOAD_URL" > /dev/null 2>&1
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}下载失败，请检查网络连接和版本号！${NC}"
+        exit 1
     fi
     
-    # 验证压缩包完整性
-    if ! tar tf "$temp_file" &>/dev/null; then
-        log error "下载文件损坏，请重试"
-        rm -f "$temp_file"
-        return 1
-    fi
-    
-    # 备份配置
-    [[ -f "$CONFIG_FILE" ]] && backup_config
-    
-    log info "解压安装..."
-    tar -zxf "$temp_file" -C "$REALM_DIR" || {
-        log error "解压失败"; rm -f "$temp_file"; return 1
-    }
-    rm -f "$temp_file"
+    echo -e "${YELLOW}解压安装文件...${NC}"
+    tar -zxvf "$REALM_DIR/realm-x86_64-unknown-linux-gnu.tar.gz" -C "$REALM_DIR" > /dev/null
     chmod +x "$REALM_BIN"
+    rm -f "$REALM_DIR"/*.tar.gz
     
-    # 初始化配置文件
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        cat > "$CONFIG_FILE" <<-EOF
+    # 创建配置文件
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat > "$CONFIG_FILE" << EOF
 [network]
 use_udp = true
 no_tcp = false
 EOF
     fi
     
-    # 服务文件配置
-    if ! grep -qs "WorkingDirectory=$REALM_DIR" "$SERVICE_FILE"; then
-        cat > "$SERVICE_FILE" <<-EOF
+    # 创建服务文件
+    if [ ! -f "$SERVICE_FILE" ]; then
+        cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=Realm Service
 After=network.target
@@ -269,76 +227,330 @@ EOF
         systemctl daemon-reload
     fi
     
-    # 启动服务
-    systemctl restart realm
-    systemctl enable --now realm &>/dev/null
+    # 重新获取安装版本
+    get_installed_version
     
-    log success "安装/更新完成"
-    log debug "当前运行版本: $($REALM_BIN --version 2>/dev/null || echo '未知')"
+    # 验证安装是否成功
+    if [ -f "$REALM_BIN" ]; then
+        echo -e "${GREEN}Realm ${CYAN}$INSTALLED_VERSION${GREEN} 安装/更新成功！${NC}"
+        
+        # 启动服务
+        systemctl start realm > /dev/null 2>&1
+        systemctl enable realm > /dev/null 2>&1
+        echo -e "${BLUE}服务已启动并设置为开机自启${NC}"
+        
+        # 显示实际版本
+        echo -e "${CYAN}实际版本验证: ${YELLOW}$($REALM_BIN -v 2>/dev/null || echo "未知")${NC}"
+    else
+        echo -e "${RED}安装失败：无法找到二进制文件！${NC}"
+    fi
 }
 
-# 其他函数的优化限于篇幅省略...
+# 添加转发规则
+add_rule() {
+    initialize
+    
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
+        echo -e "${RED}错误：Realm未安装！${NC}"
+        return
+    fi
+    
+    echo -e "\n${BLUE}添加新的转发规则${NC}"
+    read -p "请输入监听地址 (例如: 0.0.0.0:23456): " listen_addr
+    read -p "请输入目标地址 (例如: target.com:23456): " remote_addr
+    
+    # 验证输入格式
+    if ! [[ $listen_addr =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]]; then
+        echo -e "${RED}监听地址格式错误！${NC}"
+        return
+    fi
+    
+    if ! [[ $remote_addr =~ ^.+:[0-9]+$ ]]; then
+        echo -e "${RED}目标地址格式错误！${NC}"
+        return
+    fi
+    
+    # 添加到配置文件
+    cat >> "$CONFIG_FILE" << EOF
 
-# 主菜单（优化布局）
-main_menu() {
+[[endpoints]]
+listen = "$listen_addr"
+remote = "$remote_addr"
+EOF
+    
+    echo -e "${GREEN}规则添加成功！${NC}"
+    restart_service
+}
+
+# 查看转发规则
+view_rules() {
+    initialize
+    
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
+        echo -e "${RED}错误：Realm未安装！${NC}"
+        return
+    fi
+    
+    echo -e "\n${BLUE}当前转发规则：${NC}"
+    if [ ! -s "$CONFIG_FILE" ]; then
+        echo -e "${YELLOW}没有配置任何转发规则${NC}"
+        return
+    fi
+    
+    awk '/\[\[endpoints\]\]/{f=1; count++; print "规则 "count":"} 
+         f && /listen|remote/{print "  "$0} 
+         /^$/{f=0}' "$CONFIG_FILE"
+}
+
+# 删除转发规则
+delete_rule() {
+    initialize
+    
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
+        echo -e "${RED}错误：Realm未安装！${NC}"
+        return
+    fi
+    
+    view_rules
+    if [ -z "$(grep '\[endpoints\]' "$CONFIG_FILE")" ]; then
+        return
+    fi
+    
+    read -p "请输入要删除的规则编号: " rule_num
+    
+    # 验证输入
+    if ! [[ "$rule_num" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}无效的规则编号！${NC}"
+        return
+    fi
+    
+    local rule_count=$(grep -c '\[\[endpoints\]\]' "$CONFIG_FILE")
+    if [ "$rule_num" -lt 1 ] || [ "$rule_num" -gt "$rule_count" ]; then
+        echo -e "${RED}无效的规则编号！${NC}"
+        return
+    fi
+    
+    # 生成临时配置
+    awk -v rule_num=$rule_num '
+        BEGIN { count = 0 }
+        /\[\[endpoints\]\]/ {
+            count++
+            if (count == rule_num) {
+                skip = 1
+                next
+            }
+        }
+        skip && /^$/ { skip = 0; next }
+        skip { next }
+        { print }
+    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp"
+    
+    mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+    echo -e "${GREEN}规则 #$rule_num 已删除！${NC}"
+    restart_service
+}
+
+# 服务管理
+start_service() {
+    initialize
+    
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
+        echo -e "${RED}错误：Realm未安装！${NC}"
+        return
+    fi
+    
+    systemctl start realm
+    echo -e "${GREEN}服务已启动！${NC}"
+}
+
+stop_service() {
+    initialize
+    
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
+        echo -e "${RED}错误：Realm未安装！${NC}"
+        return
+    fi
+    
+    systemctl stop realm
+    echo -e "${YELLOW}服务已停止！${NC}"
+}
+
+restart_service() {
+    initialize
+    
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
+        echo -e "${RED}错误：Realm未安装！${NC}"
+        return
+    fi
+    
+    systemctl restart realm
+    echo -e "${BLUE}服务已重启！${NC}"
+}
+
+# 查看日志
+view_logs() {
+    initialize
+    
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
+        echo -e "${RED}错误：Realm未安装！${NC}"
+        return
+    fi
+    
+    journalctl -u realm -f
+}
+
+# 定时任务管理
+cron_management() {
+    initialize
+    echo -e "\n${BLUE}定时任务管理${NC}"
+    echo "1. 添加自动更新任务（每天自动检查更新）"
+    echo "2. 移除自动更新任务"
+    echo "3. 查看当前定时任务"
+    echo "4. 返回主菜单"
+    
+    read -p "请选择: " cron_choice
+    
+    case $cron_choice in
+        1)
+            # 添加每天自动更新
+            (crontab -l 2>/dev/null; echo "0 3 * * * $SCRIPT_PATH --update >/dev/null 2>&1") | crontab -
+            echo -e "${GREEN}自动更新任务已添加！${NC}"
+            ;;
+        2)
+            # 移除任务
+            crontab -l | grep -v "$SCRIPT_PATH" | crontab -
+            echo -e "${YELLOW}自动更新任务已移除！${NC}"
+            ;;
+        3)
+            echo -e "\n${CYAN}当前定时任务：${NC}"
+            crontab -l | grep "$SCRIPT_PATH"
+            ;;
+        4) return ;;
+        *) echo -e "${RED}无效选项！${NC}" ;;
+    esac
+}
+
+# 卸载Realm
+uninstall_realm() {
+    initialize
+    
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
+        echo -e "${YELLOW}Realm 未安装，无需卸载${NC}"
+        return
+    fi
+    
+    echo -e "\n${RED}正在卸载Realm...${NC}"
+    systemctl stop realm
+    systemctl disable realm
+    rm -f "$SERVICE_FILE"
+    systemctl daemon-reload
+    rm -rf "$REALM_DIR"
+    crontab -l | grep -v "$SCRIPT_PATH" | crontab -
+    echo -e "${GREEN}Realm 已完全卸载！${NC}"
+    
+    # 重置版本信息
+    INSTALLED_VERSION=""
+}
+
+# 显示系统信息
+show_system_info() {
+    echo -e "${CYAN}系统信息: ${NC}$(lsb_release -ds) ($(lsb_release -cs))"
+    echo -e "${CYAN}内核版本: ${NC}$(uname -r)"
+    echo -e "${CYAN}架构: ${NC}$(uname -m)"
+    echo -e "${CYAN}脚本路径: ${NC}$SCRIPT_PATH"
+}
+
+# 显示状态信息
+show_status() {
+    if [[ "$INSTALLED_VERSION" != "未安装" ]]; then
+        echo -e "${GREEN}Realm 状态: ${CYAN}已安装 ($INSTALLED_VERSION)${NC}"
+        
+        # 获取实际运行版本
+        local running_version
+        running_version=$(systemctl status realm 2>/dev/null | grep -oP 'realm/v\d+\.\d+\.\d+' | cut -d'/' -f2 || echo "未知")
+        
+        systemctl is-active --quiet realm && \
+            echo -e "${GREEN}服务状态: ${CYAN}运行中 (v$running_version)${NC}" || \
+            echo -e "${YELLOW}服务状态: ${RED}未运行${NC}"
+    else
+        echo -e "${YELLOW}Realm 状态: ${RED}未安装${NC}"
+    fi
+    
+    # 检查定时任务
+    if crontab -l 2>/dev/null | grep -q "$SCRIPT_PATH"; then
+        echo -e "${GREEN}自动更新: ${CYAN}已启用${NC}"
+    else
+        echo -e "${YELLOW}自动更新: ${RED}未启用${NC}"
+    fi
+    
+    # 显示最新版本信息
+    if [ -n "$LATEST_VERSION" ]; then
+        echo -e "${CYAN}最新版本: ${GREEN}$LATEST_VERSION${NC}"
+    fi
+}
+
+# 显示菜单
+show_menu() {
     clear
-    echo -e "${COLOR_INFO}Realm 管理脚本 v1.7${COLOR_RESET}"
+    echo -e "\n${GREEN}Realm 管理脚本 v1.6${NC}"
     echo "========================================"
-    echo -e "系统: $(lsb_release -ds)\n内核: $(uname -r)\n架构: $(uname -m)"
+    show_system_info
     echo "----------------------------------------"
     show_status
     echo "========================================"
-    echo "1. 安装/更新   2. 添加规则"
-    echo "3. 查看规则   4. 删除规则"
-    echo "5. 服务管理   6. 日志查看"
-    echo "7. 定时任务   8. 备份恢复"
-    echo "9. 卸载程序   0. 退出"
+    echo "1. 安装/更新 Realm"
+    echo "2. 添加转发规则"
+    echo "3. 查看转发规则"
+    echo "4. 删除转发规则"
+    echo "5. 启动服务"
+    echo "6. 停止服务"
+    echo "7. 重启服务"
+    echo "8. 查看日志"
+    echo "9. 定时任务管理"
+    echo "10. 卸载 Realm"
+    echo "0. 退出脚本"
     echo "========================================"
 }
 
-# 服务管理子菜单
-service_menu() {
-    while true; do
-        clear
-        echo -e "${COLOR_INFO}服务管理${COLOR_RESET}"
-        echo "1. 启动服务     2. 停止服务"
-        echo "3. 重启服务     4. 返回主菜单"
-        read -p "请选择: " choice
-        case $choice in
-            1) systemctl start realm; log success "服务已启动" ;;
-            2) systemctl stop realm; log warning "服务已停止" ;;
-            3) systemctl restart realm; log info "服务已重启" ;;
-            4) break ;;
-            *) log error "无效选项" ;;
-        esac
-        sleep 1
-    done
-}
-
-# 主流程
+# 主函数
 main() {
     while true; do
-        main_menu
+        show_menu
         read -p "请选择操作: " choice
+        
         case $choice in
             1) install_realm ;;
             2) add_rule ;;
             3) view_rules ;;
             4) delete_rule ;;
-            5) service_menu ;;
-            6) view_logs ;;
-            7) cron_management ;;
-            8) backup_restore_menu ;;
-            9) uninstall_realm ;;
-            0) exit 0 ;;
-            *) log error "无效选项" ;;
+            5) start_service ;;
+            6) stop_service ;;
+            7) restart_service ;;
+            8) view_logs ;;
+            9) cron_management ;;
+            10) uninstall_realm ;;
+            0) 
+                echo -e "${GREEN}再见！${NC}"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}无效选择，请重新输入！${NC}"
+                ;;
         esac
-        read -p "按回车继续..."
+        
+        echo -e "\n按回车键继续..."
+        read
     done
 }
 
-# 执行入口
-trap "echo -e '\n操作已取消'; exit" SIGINT
-check_network || exit 1
-initialize
-main
+# 脚本入口
+case "$1" in
+    "--update")
+        install_realm
+        ;;
+    *)
+        # 初始加载版本信息
+        get_installed_version
+        main
+        ;;
+esac
