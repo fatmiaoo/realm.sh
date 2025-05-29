@@ -1,14 +1,11 @@
 #!/bin/bash
 
-# Realm 高级管理脚本
+# Realm 高级管理脚本 (模块化设计)
 # 支持服务端/客户端模式 | 规则管理 | 服务控制 | 定时任务 | 日志查看
 # 开源地址: https://github.com/zhboner/realm
 # 系统要求: CentOS 7+/Debian 9+/Ubuntu 18.04+
 
-# ========================================
-# 颜色定义
-# ========================================
-
+# ====================== 配置区域 ======================
 RED="\033[31m"
 GREEN="\033[32m"
 YELLOW="\033[33m"
@@ -17,68 +14,27 @@ MAGENTA="\033[35m"
 CYAN="\033[36m"
 PLAIN="\033[0m"
 
-# ========================================
-# 全局配置
-# ========================================
-
 CONFIG_DIR="/etc/realm"
 CONFIG_FILE="$CONFIG_DIR/config.toml"
 SERVICE_FILE="/etc/systemd/system/realm.service"
 LOG_FILE="/var/log/realm.log"
 CRON_FILE="/etc/cron.d/realm-manager-cron"
 SCRIPT_FILE="/usr/local/bin/realm-manager"
+ARCH="unknown"
+LATEST_VERSION="unknown"
+INSTALLED_VERSION="unknown"
 
-# 获取最新版本函数
-get_latest_version() {
-    echo -ne "${YELLOW}正在检测最新版本...${PLAIN}"
-    LATEST_VERSION=$(curl -sL https://api.github.com/repos/zhboner/realm/releases/latest | grep '"tag_name":' | cut -d'"' -f4)
-    if [ -z "$LATEST_VERSION" ]; then
-        echo -e "\n${RED}获取最新版本失败! 使用默认版本 v2.4.6${PLAIN}"
-        LATEST_VERSION="v2.4.6"
-    else
-        echo -e "\r${GREEN}最新版本: $LATEST_VERSION${PLAIN}"
-    fi
-}
-# ========================================
-# 初始化检查
-# ========================================
+# ====================== 核心函数 ======================
 
-init_check() {
-    # 检查root权限
-    if [[ $EUID -ne 0 ]]; then
-        echo -e "${RED}✖ 必须使用root权限运行本脚本${NC}"
+# 初始化环境
+init_environment() {
+    # 检测root权限
+    if [ "$(id -u)" != "0" ]; then
+        echo -e "${RED}错误: 必须使用root用户运行此脚本!${PLAIN}"
         exit 1
     fi
-
-    # 检查curl安装
-    if ! command -v curl &> /dev/null; then
-        echo -e "${YELLOW}▶ 正在安装curl工具...${NC}"
-        if command -v apt-get &> /dev/null; then
-            apt-get update && apt-get install -y curl
-        elif command -v yum &> /dev/null; then
-            yum install -y curl
-        else
-            echo -e "${RED}✖ 无法安装curl，请手动安装${NC}"
-            exit 1
-        fi
-    fi
-
-    # 创建必要目录
-    mkdir -p "$REALM_DIR"
-    if [[ ! -w $(dirname "$LOG_FILE") ]]; then
-        echo -e "${RED}✖ 日志目录不可写，请检查权限${NC}"
-        exit 1
-    fi
-    touch "$LOG_FILE" || {
-        echo -e "${RED}✖ 无法创建日志文件${NC}"
-        exit 1
-    }
-
-    log "脚本启动 v$CURRENT_VERSION"
-}
     
-    # 架构检测
-arch_check() {
+    # 检测架构
     case "$(uname -m)" in
         x86_64)  ARCH="amd64" ;;
         aarch64) ARCH="arm64" ;;
@@ -88,28 +44,92 @@ arch_check() {
             exit 1
         ;;
     esac
+    
+    # 获取版本信息
+    get_latest_version
+    if [ -f "/usr/local/bin/realm" ]; then
+        INSTALLED_VERSION=$($(which realm) -V 2>/dev/null | awk '{print $2}')
+    fi
+    
+    # 创建必要目录
+    mkdir -p "$CONFIG_DIR"
+    touch "$CRON_FILE"
+    
+    # 安装自己为系统命令
+    if [ ! -f "$SCRIPT_FILE" ]; then
+        cp "$0" "$SCRIPT_FILE"
+        chmod +x "$SCRIPT_FILE"
+        echo -e "${GREEN}管理脚本已安装到系统命令: ${YELLOW}realm-manager${PLAIN}"
+    fi
 }
 
-# ========================================
-# 核心功能模块
-# ========================================
+# 获取最新版本
+get_latest_version() {
+    LATEST_VERSION=$(curl -sL https://api.github.com/repos/zhboner/realm/releases/latest | grep '"tag_name":' | cut -d'"' -f4)
+    if [ -z "$LATEST_VERSION" ]; then
+        LATEST_VERSION="v2.4.6"
+    fi
+}
+
+# 显示标题
+show_header() {
+    clear
+    echo -e "${GREEN}==============================================${PLAIN}"
+    echo -e "${GREEN}            Realm 高级管理脚本              ${PLAIN}"
+    echo -e "${GREEN}                模块化设计版                ${PLAIN}"
+    echo -e "${GREEN}==============================================${PLAIN}"
+    
+    # 显示版本信息
+    if [ -n "$INSTALLED_VERSION" ]; then
+        echo -e "  ${CYAN}已安装版本: ${YELLOW}${INSTALLED_VERSION}${PLAIN}"
+    else
+        echo -e "  ${CYAN}已安装版本: ${RED}未安装${PLAIN}"
+    fi
+    echo -e "  ${CYAN}最新版本:    ${YELLOW}${LATEST_VERSION}${PLAIN}"
+    echo -e "  ${CYAN}系统架构:    ${YELLOW}${ARCH}${PLAIN}"
+    
+    # 显示服务状态
+    if systemctl is-active realm >/dev/null 2>&1; then
+        echo -e "  ${CYAN}服务状态:   ${GREEN}运行中${PLAIN}"
+    else
+        echo -e "  ${CYAN}服务状态:   ${RED}未运行${PLAIN}"
+    fi
+    
+    # 显示规则数量
+    if [ -f "$CONFIG_FILE" ]; then
+        RULE_COUNT=$(grep -c "\[\[endpoints\]\]" "$CONFIG_FILE")
+        echo -e "  ${CYAN}转发规则:   ${YELLOW}$RULE_COUNT 条${PLAIN}"
+    else
+        echo -e "  ${CYAN}转发规则:   ${RED}无配置文件${PLAIN}"
+    fi
+    
+    # 显示定时任务数量
+    if [ -s "$CRON_FILE" ]; then
+        CRON_COUNT=$(wc -l < "$CRON_FILE")
+        echo -e "  ${CYAN}定时任务:   ${YELLOW}$CRON_COUNT 个${PLAIN}"
+    else
+        echo -e "  ${CYAN}定时任务:   ${YELLOW}无${PLAIN}"
+    fi
+    
+    echo -e "${GREEN}==============================================${PLAIN}"
+}
+
+# ====================== 安装/更新模块 ======================
 
 # 安装 Realm
 install_realm() {
-    if [ -f "/usr/local/bin/realm" ]; then
-        echo -e "${YELLOW}Realm 已安装，重新安装将覆盖现有配置${PLAIN}"
-        read -rp "是否继续? [y/N]: " confirm
-        [[ ! $confirm =~ ^[Yy]$ ]] && return
-    fi
+    echo -e "\n${BLUE}>>> 安装 Realm${PLAIN}"
     
-    get_latest_version
-    arch_check
+    if [ -f "/usr/local/bin/realm" ]; then
+        echo -e "${YELLOW}Realm 已安装，将更新到最新版本${PLAIN}"
+    fi
     
     DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}/realm-${ARCH}-unknown-linux-gnu.tar.gz"
     
-    echo -e "${YELLOW}正在下载 Realm...${PLAIN}"
+    echo -e "${YELLOW}正在下载 Realm ${LATEST_VERSION}...${PLAIN}"
     mkdir -p /tmp/realm
     curl -sL "$DOWNLOAD_URL" -o /tmp/realm.tar.gz
+    
     if [ $? -ne 0 ]; then
         echo -e "${RED}下载失败! 请检查网络或手动下载:${PLAIN} $DOWNLOAD_URL"
         exit 1
@@ -125,11 +145,9 @@ install_realm() {
         exit 1
     fi
     
-    # 创建配置目录
-    mkdir -p "$CONFIG_DIR"
-    
-    # 基础配置文件
-    cat > "$CONFIG_FILE" << EOF
+    # 创建基础配置文件
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat > "$CONFIG_FILE" << EOF
 [log]
 level = "info"
 output = "$LOG_FILE"
@@ -140,6 +158,7 @@ output = "$LOG_FILE"
 # listen = "0.0.0.0:8080"
 # remote = "127.0.0.1:80"
 EOF
+    fi
     
     # 创建 systemd 服务
     cat > "$SERVICE_FILE" << EOF
@@ -162,10 +181,62 @@ EOF
     systemctl daemon-reload
     systemctl enable realm >/dev/null 2>&1
     
-    echo -e "${GREEN}Realm 安装完成!${PLAIN}"
+    INSTALLED_VERSION=$($(which realm) -V 2>/dev/null | awk '{print $2}')
+    echo -e "${GREEN}Realm ${INSTALLED_VERSION} 安装完成!${PLAIN}"
     echo -e "配置文件: ${YELLOW}$CONFIG_FILE${PLAIN}"
-    echo -e "使用 ${YELLOW}realm-manager${PLAIN} 命令管理"
 }
+
+# 更新 Realm
+update_realm() {
+    echo -e "\n${BLUE}>>> 更新 Realm${PLAIN}"
+    
+    if [ ! -f "/usr/local/bin/realm" ]; then
+        echo -e "${YELLOW}Realm 未安装，将执行安装操作${PLAIN}"
+        install_realm
+        return
+    fi
+    
+    # 获取当前版本
+    CURRENT_VERSION=$($(which realm) -V 2>/dev/null | awk '{print $2}')
+    
+    # 检查是否需要更新
+    if [ "$CURRENT_VERSION" == "$LATEST_VERSION" ]; then
+        echo -e "${GREEN}当前已是最新版本 (${CURRENT_VERSION})，无需更新${PLAIN}"
+        return
+    fi
+    
+    echo -e "${YELLOW}当前版本: ${CURRENT_VERSION}${PLAIN}"
+    echo -e "${YELLOW}最新版本: ${LATEST_VERSION}${PLAIN}"
+    
+    # 停止服务
+    systemctl stop realm
+    
+    # 下载新版本
+    DOWNLOAD_URL="https://github.com/zhboner/realm/releases/download/${LATEST_VERSION}/realm-${ARCH}-unknown-linux-gnu.tar.gz"
+    echo -e "${YELLOW}正在下载新版本...${PLAIN}"
+    mkdir -p /tmp/realm
+    curl -sL "$DOWNLOAD_URL" -o /tmp/realm.tar.gz
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}下载失败!${PLAIN}"
+        systemctl start realm
+        exit 1
+    fi
+    
+    # 解压并替换
+    tar xzf /tmp/realm.tar.gz -C /tmp/realm
+    mv /tmp/realm/realm /usr/local/bin/realm
+    chmod +x /usr/local/bin/realm
+    rm -rf /tmp/realm /tmp/realm.tar.gz
+    
+    # 启动服务
+    systemctl start realm
+    
+    INSTALLED_VERSION=$($(which realm) -V 2>/dev/null | awk '{print $2}')
+    echo -e "${GREEN}Realm 已成功更新到 ${INSTALLED_VERSION}${PLAIN}"
+}
+
+# ====================== 规则管理模块 ======================
 
 # 添加转发规则
 add_rule() {
@@ -259,7 +330,7 @@ EOF
 view_rules() {
     echo -e "\n${BLUE}>>> 当前转发规则${PLAIN}"
     
-    if ! grep -q "\[\[endpoints\]\]" "$CONFIG_FILE"; then
+    if [ ! -f "$CONFIG_FILE" ] || ! grep -q "\[\[endpoints\]\]" "$CONFIG_FILE"; then
         echo -e "${YELLOW}没有找到转发规则${PLAIN}"
         return
     fi
@@ -277,7 +348,7 @@ view_rules() {
 delete_rule() {
     view_rules
     
-    if ! grep -q "\[\[endpoints\]\]" "$CONFIG_FILE"; then
+    if [ ! -f "$CONFIG_FILE" ] || ! grep -q "\[\[endpoints\]\]" "$CONFIG_FILE"; then
         return
     fi
     
@@ -320,6 +391,8 @@ delete_rule() {
     echo -e "${GREEN}规则 #$rule_num 已删除!${PLAIN}"
     view_rules
 }
+
+# ====================== 服务管理模块 ======================
 
 # 服务控制
 service_control() {
@@ -392,6 +465,8 @@ log_management() {
     esac
 }
 
+# ====================== 定时任务模块 ======================
+
 # 定时任务管理
 cron_management() {
     echo -e "\n${BLUE}>>> 定时任务管理${PLAIN}"
@@ -449,6 +524,8 @@ cron_management() {
     esac
 }
 
+# ====================== 系统管理模块 ======================
+
 # 卸载 Realm
 uninstall_realm() {
     echo -e "\n${RED}>>> 卸载 Realm${PLAIN}"
@@ -490,109 +567,41 @@ uninstall_realm() {
     exit 0
 }
 
-# 显示状态信息
-show_status() {
-    clear
-    echo -e "${GREEN}==============================================${PLAIN}"
-    echo -e "${GREEN}            Realm 高级管理脚本              ${PLAIN}"
-    echo -e "${GREEN}==============================================${PLAIN}"
-    
-    # 显示版本信息
-    if [ -f "/usr/local/bin/realm" ]; then
-        INSTALLED_VERSION=$($(which realm) -V 2>/dev/null | awk '{print $2}')
-        echo -e "  ${CYAN}Realm 版本: ${YELLOW}${INSTALLED_VERSION:-未知}${PLAIN}"
-    else
-        echo -e "  ${RED}Realm 未安装${PLAIN}"
-    fi
-    
-    # 显示服务状态
-    if systemctl is-active realm >/dev/null 2>&1; then
-        echo -e "  ${CYAN}服务状态: ${GREEN}运行中${PLAIN}"
-    else
-        echo -e "  ${CYAN}服务状态: ${RED}未运行${PLAIN}"
-    fi
-    
-    # 显示规则数量
-    if [ -f "$CONFIG_FILE" ]; then
-        RULE_COUNT=$(grep -c "\[\[endpoints\]\]" "$CONFIG_FILE")
-        echo -e "  ${CYAN}转发规则: ${YELLOW}$RULE_COUNT 条${PLAIN}"
-    else
-        echo -e "  ${CYAN}转发规则: ${RED}无配置文件${PLAIN}"
-    fi
-    
-    # 显示定时任务数量
-    if [ -f "$CRON_FILE" ] && [ -s "$CRON_FILE" ]; then
-        CRON_COUNT=$(wc -l < "$CRON_FILE")
-        echo -e "  ${CYAN}定时任务: ${YELLOW}$CRON_COUNT 个${PLAIN}"
-    else
-        echo -e "  ${CYAN}定时任务: ${YELLOW}无${PLAIN}"
-    fi
-    
-    echo -e "${GREEN}==============================================${PLAIN}"
-}
+# ====================== 主菜单模块 ======================
 
-# 显示菜单
+# 显示主菜单
 show_menu() {
     echo -e "${MAGENTA}主菜单:${PLAIN}"
-    echo "1) 安装/更新 Realm"
-    echo "2) 添加转发规则"
-    echo "3) 查看转发规则"
-    echo "4) 删除转发规则"
-    echo "5) 服务控制 (启动/停止/重启)"
-    echo "6) 日志管理"
-    echo "7) 定时任务管理"
-    echo "8) 完全卸载 Realm"
+    echo "1) 安装 Realm"
+    echo "2) 更新 Realm"
+    echo "3) 添加转发规则"
+    echo "4) 查看转发规则"
+    echo "5) 删除转发规则"
+    echo "6) 服务控制 (启动/停止/重启)"
+    echo "7) 日志管理"
+    echo "8) 定时任务管理"
+    echo "9) 完全卸载 Realm"
     echo "0) 退出脚本"
     echo -e "${GREEN}==============================================${PLAIN}"
 }
 
-# 主函数
-main() {
-    # 检查root权限
-    if [ "$(id -u)" != "0" ]; then
-        echo -e "${RED}错误: 必须使用root用户运行此脚本!${PLAIN}"
-        exit 1
-    fi
-    
-    # 初始化变量
-    ARCH="unknown"
-    LATEST_VERSION="unknown"
-    
-    # 检测架构
-    arch_check
-    
-    # 获取最新版本
-    get_latest_version
-    
-    # 创建定时任务文件
-    touch $CRON_FILE
-    
-    # 安装自己为系统命令
-    if [ ! -f "$SCRIPT_FILE" ]; then
-        cp "$0" "$SCRIPT_FILE"
-        chmod +x "$SCRIPT_FILE"
-    fi
-    
-    # 处理命令行参数
-    if [ "$1" == "--update" ]; then
-        install_realm
-        exit 0
-    fi
-    
+# 主循环
+main_loop() {
     while true; do
-        show_status
+        show_header
         show_menu
-        read -rp "请输入选项 [0-8]: " choice
+        read -rp "请输入选项 [0-9]: " choice
         
         case $choice in
             1) install_realm ;;
-            2) add_rule ;;
-            3) view_rules ;;
-            4) delete_rule ;;
-            5) service_control ;;
-            6) log_management ;;
-            7) cron_management ;;
-            8) uninstall_realm ;;
+            2) update_realm ;;
+            3) add_rule ;;
+            4) view_rules ;;
+            5) delete_rule ;;
+            6) service_control ;;
+            7) log_management ;;
+            8) cron_management ;;
+            9) uninstall_realm ;;
             0) 
                 echo -e "${GREEN}已退出脚本${PLAIN}"
                 exit 0 
@@ -607,5 +616,23 @@ main() {
     done
 }
 
-# 启动主函数
-main "$@"
+# ====================== 脚本入口 ======================
+
+# 处理命令行参数
+if [ "$1" == "--install" ]; then
+    init_environment
+    install_realm
+    exit 0
+elif [ "$1" == "--update" ]; then
+    init_environment
+    update_realm
+    exit 0
+elif [ "$1" == "--add-rule" ]; then
+    init_environment
+    add_rule
+    exit 0
+fi
+
+# 主程序入口
+init_environment
+main_loop
