@@ -68,6 +68,7 @@ get_latest_version() {
     LATEST_VERSION=$(curl -sL https://api.github.com/repos/zhboner/realm/releases/latest | grep '"tag_name":' | cut -d'"' -f4)
     if [ -z "$LATEST_VERSION" ]; then
         LATEST_VERSION="v2.4.6"
+        echo -e "${YELLOW}警告: 无法获取最新版本，使用默认版本 v2.4.6${PLAIN}"
     fi
 }
 
@@ -158,6 +159,7 @@ output = "$LOG_FILE"
 # listen = "0.0.0.0:8080"
 # remote = "127.0.0.1:80"
 EOF
+        echo -e "${GREEN}配置文件已创建: ${YELLOW}$CONFIG_FILE${PLAIN}"
     fi
     
     # 创建 systemd 服务
@@ -184,6 +186,14 @@ EOF
     INSTALLED_VERSION=$($(which realm) -V 2>/dev/null | awk '{print $2}')
     echo -e "${GREEN}Realm ${INSTALLED_VERSION} 安装完成!${PLAIN}"
     echo -e "配置文件: ${YELLOW}$CONFIG_FILE${PLAIN}"
+    
+    # 启动服务
+    systemctl start realm
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}服务已成功启动${PLAIN}"
+    else
+        echo -e "${YELLOW}服务启动失败，请检查配置${PLAIN}"
+    fi
 }
 
 # 更新 Realm
@@ -234,9 +244,25 @@ update_realm() {
     
     INSTALLED_VERSION=$($(which realm) -V 2>/dev/null | awk '{print $2}')
     echo -e "${GREEN}Realm 已成功更新到 ${INSTALLED_VERSION}${PLAIN}"
+    
+    if systemctl is-active realm >/dev/null 2>&1; then
+        echo -e "${GREEN}服务已成功启动${PLAIN}"
+    else
+        echo -e "${YELLOW}服务启动失败，请检查配置${PLAIN}"
+        systemctl status realm --no-pager -l
+    fi
 }
 
 # ====================== 规则管理模块 ======================
+
+# 检查端口占用
+check_port() {
+    local port=$1
+    if ss -tuln | grep -q ":$port "; then
+        return 1  # 端口已被占用
+    fi
+    return 0  # 端口可用
+}
 
 # 添加转发规则
 add_rule() {
@@ -256,7 +282,7 @@ add_rule() {
                 fi
                 
                 # 检查端口是否被占用
-                if lsof -i:"$LISTEN_PORT" >/dev/null; then
+                if ! check_port "$LISTEN_PORT"; then
                     echo -e "${RED}端口 $LISTEN_PORT 已被占用!${PLAIN}"
                 else
                     break
@@ -289,7 +315,7 @@ EOF
                 fi
                 
                 # 检查端口是否被占用
-                if lsof -i:"$LOCAL_PORT" >/dev/null; then
+                if ! check_port "$LOCAL_PORT"; then
                     echo -e "${RED}端口 $LOCAL_PORT 已被占用!${PLAIN}"
                 else
                     break
@@ -321,8 +347,13 @@ EOF
     
     # 重启服务
     systemctl restart realm
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}规则添加成功! 服务已重启${PLAIN}"
+    else
+        echo -e "${RED}服务重启失败! 请检查配置${PLAIN}"
+        systemctl status realm --no-pager -l
+    fi
     
-    echo -e "${GREEN}规则添加成功!${PLAIN}"
     view_rules
 }
 
@@ -341,7 +372,7 @@ view_rules() {
     
     # 显示服务状态
     echo -e "\n${BLUE}服务状态:${PLAIN}"
-    systemctl status realm --no-pager -l | awk 'NR==1 || NR==2 || NR==3; /Active:/'
+    systemctl status realm --no-pager -l | head -n 5
 }
 
 # 删除转发规则
@@ -362,7 +393,7 @@ delete_rule() {
     
     if ! [[ "$rule_num" =~ ^[0-9]+$ ]] || [ "$rule_num" -gt "$rule_count" ] || [ "$rule_num" -lt 1 ]; then
         echo -e "${RED}无效的规则编号!${PLAIN}"
-        exit 1
+        return
     fi
     
     # 创建临时文件
@@ -387,8 +418,13 @@ delete_rule() {
     
     # 重启服务
     systemctl restart realm
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}规则 #$rule_num 已删除! 服务已重启${PLAIN}"
+    else
+        echo -e "${RED}服务重启失败! 请检查配置${PLAIN}"
+        systemctl status realm --no-pager -l
+    fi
     
-    echo -e "${GREEN}规则 #$rule_num 已删除!${PLAIN}"
     view_rules
 }
 
@@ -407,15 +443,29 @@ service_control() {
     case $choice in
         1) 
             systemctl start realm
-            echo -e "${GREEN}服务已启动${PLAIN}"
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}服务已成功启动${PLAIN}"
+            else
+                echo -e "${RED}服务启动失败!${PLAIN}"
+                systemctl status realm --no-pager -l
+            fi
             ;;
         2) 
             systemctl stop realm
-            echo -e "${YELLOW}服务已停止${PLAIN}"
+            if [ $? -eq 0 ]; then
+                echo -e "${YELLOW}服务已停止${PLAIN}"
+            else
+                echo -e "${RED}服务停止失败!${PLAIN}"
+            fi
             ;;
         3) 
             systemctl restart realm
-            echo -e "${GREEN}服务已重启${PLAIN}"
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}服务已重启${PLAIN}"
+            else
+                echo -e "${RED}服务重启失败!${PLAIN}"
+                systemctl status realm --no-pager -l
+            fi
             ;;
         4) 
             systemctl status realm --no-pager -l
@@ -484,6 +534,12 @@ cron_management() {
             echo -e "请使用cron格式输入时间 (分 时 日 月 周)"
             read -rp "请输入cron时间表达式: " cron_time
             
+            # 验证cron格式
+            if [[ ! "$cron_time" =~ ^[0-9*\/,-]+\ [0-9*\/,-]+\ [0-9*\/,-]+\ [0-9*\/,-]+\ [0-9*\/,-]+$ ]]; then
+                echo -e "${RED}无效的cron表达式!${PLAIN}"
+                return
+            fi
+            
             # 添加定时任务
             echo "$cron_time root systemctl restart realm" >> $CRON_FILE
             echo -e "${GREEN}定时重启任务已添加!${PLAIN}"
@@ -493,6 +549,12 @@ cron_management() {
             echo -e "示例: 每周一凌晨2点更新: ${YELLOW}0 2 * * 1${PLAIN}"
             echo -e "请使用cron格式输入时间 (分 时 日 月 周)"
             read -rp "请输入cron时间表达式: " cron_time
+            
+            # 验证cron格式
+            if [[ ! "$cron_time" =~ ^[0-9*\/,-]+\ [0-9*\/,-]+\ [0-9*\/,-]+\ [0-9*\/,-]+\ [0-9*\/,-]+$ ]]; then
+                echo -e "${RED}无效的cron表达式!${PLAIN}"
+                return
+            fi
             
             # 添加定时任务
             echo "$cron_time root $SCRIPT_FILE --update" >> $CRON_FILE
@@ -546,9 +608,6 @@ uninstall_realm() {
     # 删除定时任务
     rm -f "$CRON_FILE"
     
-    # 删除管理脚本
-    rm -f "$SCRIPT_FILE"
-    
     # 提示用户选择删除配置和日志
     echo -e "${YELLOW}是否删除配置文件?${PLAIN}"
     read -rp "删除配置目录 $CONFIG_DIR? [y/N]: " del_config
@@ -561,6 +620,9 @@ uninstall_realm() {
     if [[ $del_log =~ ^[Yy]$ ]]; then
         rm -f "$LOG_FILE"
     fi
+    
+    # 删除管理脚本
+    rm -f "$SCRIPT_FILE"
     
     echo -e "${GREEN}Realm 已完全卸载${PLAIN}"
     echo -e "感谢使用，再见!"
