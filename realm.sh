@@ -1,5 +1,5 @@
 #!/bin/bash
-# realm.sh - Realm 管理脚本 v1.4
+# realm.sh - Realm 管理脚本 v1.6
 
 # 全局配置
 REALM_DIR="/etc/realm"
@@ -54,35 +54,58 @@ compare_versions() {
     return 0
 }
 
-# 获取最新版本（改进版本）
+# 获取最新版本（完全重构）
 get_latest_version() {
-    # 尝试三种不同方法获取最新版本
-    local version_sources=(
-        # 方法1: 使用GitHub API
-        "$(curl -s "$REPO_URL" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')"
-        
-        # 方法2: 解析GitHub发布页面
-        "$(curl -s https://github.com/zhboner/realm/releases | \
-          grep -oE '/zhboner/realm/releases/tag/v[0-9]+\.[0-9]+\.[0-9]+' | \
-          head -1 | awk -F'/' '{print $NF}')"
-          
-        # 方法3: 从下载链接解析
-        "$(curl -s https://github.com/zhboner/realm/releases | \
-          grep -oE 'href="/zhboner/realm/releases/download/v[0-9]+\.[0-9]+\.[0-9]+' | \
-          head -1 | awk -F'/' '{print $NF}')"
-    )
+    # 直接使用GitHub API获取版本信息
+    local api_response
+    api_response=$(curl -s -H "Accept: application/vnd.github.v3+json" "$REPO_URL")
     
-    # 验证并选择有效的版本
-    for version in "${version_sources[@]}"; do
-        if [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            LATEST_VERSION="$version"
+    if [ $? -ne 0 ]; then
+        echo -e "${YELLOW}警告：无法访问GitHub API，尝试备用方法...${NC}"
+        # 备用方法：从下载页面解析
+        LATEST_VERSION=$(curl -s https://github.com/zhboner/realm/releases | \
+            grep -oE 'realm/releases/tag/v[0-9]+\.[0-9]+\.[0-9]+' | \
+            head -1 | awk -F'/' '{print $NF}')
+        
+        if [[ "$LATEST_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo -e "${GREEN}使用备用方法获取版本: ${CYAN}$LATEST_VERSION${NC}"
             return
         fi
-    done
+    else
+        # 从API响应中提取版本号
+        LATEST_VERSION=$(echo "$api_response" | grep '"tag_name":' | cut -d'"' -f4)
+    fi
     
-    # 所有方法都失败时使用默认版本
-    echo -e "${YELLOW}警告：无法获取最新版本号，使用默认版本 v2.7.0${NC}"
-    LATEST_VERSION="v2.7.0"
+    # 验证版本格式
+    if ! [[ "$LATEST_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${YELLOW}警告：无法获取有效版本号，使用默认版本 v2.7.0${NC}"
+        LATEST_VERSION="v2.7.0"
+    fi
+    
+    echo -e "${GREEN}检测到最新版本: ${CYAN}$LATEST_VERSION${NC}"
+}
+
+# 获取已安装版本（完全重构）
+get_installed_version() {
+    if [ -f "$REALM_BIN" ]; then
+        # 尝试多种方法获取版本信息
+        local version_output
+        version_output=$("$REALM_BIN" -v 2>/dev/null || "$REALM_BIN" --version 2>/dev/null)
+        
+        # 尝试解析版本号
+        if [[ "$version_output" =~ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            INSTALLED_VERSION="v${BASH_REMATCH[0]}"
+        elif [[ "$version_output" =~ v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            INSTALLED_VERSION="${BASH_REMATCH[0]}"
+        else
+            # 如果无法解析，使用文件时间戳作为最后手段
+            local install_date
+            install_date=$(stat -c %y "$REALM_BIN" | cut -d' ' -f1)
+            INSTALLED_VERSION="未知版本 (安装于 $install_date)"
+        fi
+    else
+        INSTALLED_VERSION="未安装"
+    fi
 }
 
 # 初始化检查
@@ -108,7 +131,7 @@ initialize() {
     
     # 4. 检查并安装必要依赖
     local missing_deps=()
-    for dep in wget tar curl jq; do
+    for dep in wget tar curl; do
         if ! command -v $dep &> /dev/null; then
             missing_deps+=("$dep")
         fi
@@ -126,12 +149,8 @@ initialize() {
         exit 1
     fi
     
-    # 6. 加载已安装版本信息
-    if [ -f "$REALM_BIN" ]; then
-        INSTALLED_VERSION=$("$REALM_BIN" -v 2>/dev/null | awk '{print $2}')
-    fi
-    
-    # 7. 获取最新版本
+    # 6. 获取版本信息
+    get_installed_version
     get_latest_version
 }
 
@@ -139,12 +158,12 @@ initialize() {
 install_realm() {
     initialize
     
-    echo -e "${CYAN}当前安装版本: ${YELLOW}${INSTALLED_VERSION:-未安装}${NC}"
+    echo -e "${CYAN}当前安装版本: ${YELLOW}$INSTALLED_VERSION${NC}"
     echo -e "${CYAN}最新可用版本: ${GREEN}$LATEST_VERSION${NC}"
     
-    if [ -n "$INSTALLED_VERSION" ]; then
+    if [[ "$INSTALLED_VERSION" != "未安装" ]]; then
         # 比较版本
-        compare_versions "$INSTALLED_VERSION" "$LATEST_VERSION"
+        compare_versions "${INSTALLED_VERSION#v}" "${LATEST_VERSION#v}"
         local cmp_result=$?
         
         if [ $cmp_result -eq 0 ]; then
@@ -208,24 +227,30 @@ EOF
         systemctl daemon-reload
     fi
     
-    # 重新加载安装信息
+    # 重新获取安装版本
+    get_installed_version
+    
+    # 验证安装是否成功
     if [ -f "$REALM_BIN" ]; then
-        INSTALLED_VERSION=$("$REALM_BIN" -v 2>/dev/null | awk '{print $2}')
+        echo -e "${GREEN}Realm ${CYAN}$INSTALLED_VERSION${GREEN} 安装/更新成功！${NC}"
+        
+        # 启动服务
+        systemctl start realm > /dev/null 2>&1
+        systemctl enable realm > /dev/null 2>&1
+        echo -e "${BLUE}服务已启动并设置为开机自启${NC}"
+        
+        # 显示实际版本
+        echo -e "${CYAN}实际版本验证: ${YELLOW}$($REALM_BIN -v 2>/dev/null || echo "未知")${NC}"
+    else
+        echo -e "${RED}安装失败：无法找到二进制文件！${NC}"
     fi
-    
-    echo -e "${GREEN}Realm ${CYAN}${INSTALLED_VERSION:-新版本}${GREEN} 安装/更新成功！${NC}"
-    
-    # 启动服务
-    systemctl start realm > /dev/null 2>&1
-    systemctl enable realm > /dev/null 2>&1
-    echo -e "${BLUE}服务已启动并设置为开机自启${NC}"
 }
 
 # 添加转发规则
 add_rule() {
     initialize
     
-    if [ -z "$INSTALLED_VERSION" ]; then
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
         echo -e "${RED}错误：Realm未安装！${NC}"
         return
     fi
@@ -261,7 +286,7 @@ EOF
 view_rules() {
     initialize
     
-    if [ -z "$INSTALLED_VERSION" ]; then
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
         echo -e "${RED}错误：Realm未安装！${NC}"
         return
     fi
@@ -281,7 +306,7 @@ view_rules() {
 delete_rule() {
     initialize
     
-    if [ -z "$INSTALLED_VERSION" ]; then
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
         echo -e "${RED}错误：Realm未安装！${NC}"
         return
     fi
@@ -329,7 +354,7 @@ delete_rule() {
 start_service() {
     initialize
     
-    if [ -z "$INSTALLED_VERSION" ]; then
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
         echo -e "${RED}错误：Realm未安装！${NC}"
         return
     fi
@@ -341,7 +366,7 @@ start_service() {
 stop_service() {
     initialize
     
-    if [ -z "$INSTALLED_VERSION" ]; then
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
         echo -e "${RED}错误：Realm未安装！${NC}"
         return
     fi
@@ -353,7 +378,7 @@ stop_service() {
 restart_service() {
     initialize
     
-    if [ -z "$INSTALLED_VERSION" ]; then
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
         echo -e "${RED}错误：Realm未安装！${NC}"
         return
     fi
@@ -366,7 +391,7 @@ restart_service() {
 view_logs() {
     initialize
     
-    if [ -z "$INSTALLED_VERSION" ]; then
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
         echo -e "${RED}错误：Realm未安装！${NC}"
         return
     fi
@@ -409,7 +434,7 @@ cron_management() {
 uninstall_realm() {
     initialize
     
-    if [ -z "$INSTALLED_VERSION" ]; then
+    if [[ "$INSTALLED_VERSION" == "未安装" ]]; then
         echo -e "${YELLOW}Realm 未安装，无需卸载${NC}"
         return
     fi
@@ -437,10 +462,15 @@ show_system_info() {
 
 # 显示状态信息
 show_status() {
-    if [ -n "$INSTALLED_VERSION" ]; then
-        echo -e "${GREEN}Realm 状态: ${CYAN}已安装 (v$INSTALLED_VERSION)${NC}"
+    if [[ "$INSTALLED_VERSION" != "未安装" ]]; then
+        echo -e "${GREEN}Realm 状态: ${CYAN}已安装 ($INSTALLED_VERSION)${NC}"
+        
+        # 获取实际运行版本
+        local running_version
+        running_version=$(systemctl status realm 2>/dev/null | grep -oP 'realm/v\d+\.\d+\.\d+' | cut -d'/' -f2 || echo "未知")
+        
         systemctl is-active --quiet realm && \
-            echo -e "${GREEN}服务状态: ${CYAN}运行中${NC}" || \
+            echo -e "${GREEN}服务状态: ${CYAN}运行中 (v$running_version)${NC}" || \
             echo -e "${YELLOW}服务状态: ${RED}未运行${NC}"
     else
         echo -e "${YELLOW}Realm 状态: ${RED}未安装${NC}"
@@ -462,7 +492,7 @@ show_status() {
 # 显示菜单
 show_menu() {
     clear
-    echo -e "\n${GREEN}Realm 管理脚本 v1.4${NC}"
+    echo -e "\n${GREEN}Realm 管理脚本 v1.6${NC}"
     echo "========================================"
     show_system_info
     echo "----------------------------------------"
@@ -520,9 +550,7 @@ case "$1" in
         ;;
     *)
         # 初始加载版本信息
-        if [ -f "$REALM_BIN" ]; then
-            INSTALLED_VERSION=$("$REALM_BIN" -v 2>/dev/null | awk '{print $2}')
-        fi
+        get_installed_version
         main
         ;;
 esac
